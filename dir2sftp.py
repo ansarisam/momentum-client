@@ -1,6 +1,4 @@
 import configparser
-import pyodbc
-import csv
 import paramiko
 import smtplib
 from email.mime.text import MIMEText
@@ -25,60 +23,38 @@ def read_config(filename):
     config.read(filename)
     return config
 
-def query_sql_server(config):
-    try:
-        query = config['DBServer']['query']
-        conn_str = (
-            f"DRIVER={config['DBServer']['driver']};"
-            f"SERVER={config['DBServer']['host']};"
-            f"DATABASE={config['DBServer']['database']};"
-            f"UID={config['DBServer']['username']};"
-            f"PWD={config['DBServer']['password']}"
-        )
-        with pyodbc.connect(conn_str) as conn:
-            cursor = conn.cursor()
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            return rows
-    except Exception as e:
-        logging.error(f"Error querying the SQL Server: {e}")
-        raise
-
-def write_to_csv(data, filename):
-    try:
-        with open(filename, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerows(data)
-        logging.info(f"Results saved to {filename}")
-    except Exception as e:
-        logging.error(f"Error writing to CSV file: {e}")
-        raise
-
-def send_via_sftp(config, local_file):
-    try:
-        hostname = config['hostname']
-        port = int(config['port'])
-        username = config['username']
-        password = config['password']
-        remote_directory = config['remote_directory']
-
-        logging.debug(f"SFTP Configuration: hostname={hostname}, port={port}, username={username}, remote_directory={remote_directory}")
-
-        with paramiko.Transport((hostname, port)) as transport:
-            transport.connect(username=username, password=password)
-            with paramiko.SFTPClient.from_transport(transport) as sftp:
-                sftp.put(local_file, f"{remote_directory}/{os.path.basename(local_file)}")
-                logging.info(f"Transferred {local_file} to {remote_directory}")
-    except Exception as e:
-        logging.error(f"Error during SFTP transfer: {e}")
-        raise
-
 def delete_csv_file(filename):
     try:
         os.remove(filename)
         logging.info(f"{filename} deleted.")
     except Exception as e:
         logging.error(f"Error deleting file {filename}: {e}")
+
+def send_via_sftp(config):
+    try:
+        hostname = config['hostname']
+        port = int(config['port'])
+        username = config['username']
+        password = config['password']
+        remote_directory = config['remote_directory']
+        local_dir = config['local_dir']
+        delete_after_transmit = config.getboolean('delete_csv_after_transmit', fallback=False)
+
+        logging.debug(f"SFTP Configuration: hostname={hostname}, port={port}, username={username}, remote_directory={remote_directory}, local_dir={local_dir}")
+
+        with paramiko.Transport((hostname, port)) as transport:
+            transport.connect(username=username, password=password)
+            with paramiko.SFTPClient.from_transport(transport) as sftp:
+                for local_file in os.listdir(local_dir):
+                    local_file_path = os.path.join(local_dir, local_file)
+                    if os.path.isfile(local_file_path):
+                        remote_file_path = f"{remote_directory}/{local_file}"
+                        sftp.put(local_file_path, remote_file_path)
+                        logging.info(f"Transferred {local_file_path} to {remote_file_path}")
+                        if delete_after_transmit:
+                            delete_csv_file(local_file_path)
+    except Exception as e:
+        logging.error(f"An error occurred during SFTP transfer: {e}")
         raise
 
 def send_email(config, success=True):
@@ -112,20 +88,12 @@ def send_email(config, success=True):
 
 def main():
     setup_logger('transmission_log.log')
-    logging.info("Starting CSV file transmission process.")
+    logging.info("Starting file transmission process.")
 
     try:
         config = read_config('conf.ini')
-
-        result = query_sql_server(config)
-        output_file = 'output.csv'
-        write_to_csv(result, output_file)
-
-        send_via_sftp(config['SFTP'], output_file)
-
-        if config.getboolean('SFTP', 'delete_csv_after_transmit', fallback=False):
-            delete_csv_file(output_file)
-
+        send_via_sftp(config['SFTP'])
+        logging.info("All files from the input dir sent to SFTP server.")
         send_email(config, success=True)
     except Exception as e:
         logging.error(f"An error occurred: {e}")
